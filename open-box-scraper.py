@@ -57,23 +57,37 @@ def extract_product_info(product):
         except:
             sale_price = None
 
-        image_elems = product.find_elements(By.CSS_SELECTOR, "img[data-test-id='alt-image']")
-        image_urls = [img.get_attribute("src") for img in image_elems if img.get_attribute("src")]
+        # Scroll into view to help load image
+        try:
+            ActionChains(driver).move_to_element(product).perform()
+            time.sleep(1.5)
+        except:
+            pass
 
-        product_type = title.split()[-1]
-        product_category = "Kitchenware" if "butter" in title.lower() else "Furniture"
+        image_url = None
+        try:
+            image_elem = product.find_element(By.CSS_SELECTOR, "img.product-image")
+        except:
+            try:
+                image_elem = product.find_element(By.CSS_SELECTOR, "img.alt-image")
+            except:
+                logging.warning("No image found for product.")
+                image_elem = None
+
+        if image_elem:
+            image_url = image_elem.get_attribute("src") or image_elem.get_attribute("data-src")
+            if image_url:
+                image_url = image_url.replace("-t.jpg", "-c.jpg").replace("-j.jpg", "-c.jpg")
 
         return {
             "Product Name": title,
             "Original Price": orig_price,
             "Sale Price": sale_price,
-            "Image URL": image_urls[0] if image_urls else None,
-            "All Image URLs": image_urls,
+            "Image URL": image_url,
             "Product Display Page URL": full_url,
-            "Store": "Williams Sonoma",
-            "Product Type": product_type,
-            "Product Category": product_category
+            "Store": "Williams Sonoma"
         }
+
     except Exception as e:
         logging.warning(f"Failed to parse product: {e}")
         return None
