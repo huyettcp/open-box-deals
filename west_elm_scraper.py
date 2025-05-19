@@ -35,16 +35,16 @@ def scroll_page(driver):
     while True:
         products = driver.find_elements(By.CLASS_NAME, "grid-item")
         current_count = len(products)
+        logging.info(f"Scrolled to {current_count} products")
 
-        # Try clicking 'Show Me More' if it appears
         try:
             show_more = driver.find_element(By.XPATH, "//div[contains(@class, 'show-me-more')]/button")
             if show_more.is_displayed():
                 logging.info("Clicking 'Show Me More' button")
                 driver.execute_script("arguments[0].click();", show_more)
                 time.sleep(random.uniform(2.0, 3.0))
-        except:
-            pass
+        except Exception as e:
+            logging.debug("No 'Show Me More' button found: %s", e)
 
         if current_count > last_count:
             last_count = current_count
@@ -61,18 +61,28 @@ def scroll_page(driver):
 
 def scrape_products(driver):
     data = []
+    skipped = []
     blocks = driver.find_elements(By.CLASS_NAME, "grid-item")
     logging.info(f"Extracting {len(blocks)} products...")
 
-    for block in blocks:
+    for i, block in enumerate(blocks):
         try:
-            title_el = block.find_element(By.CLASS_NAME, "product-name")
+            driver.execute_script("arguments[0].scrollIntoView(true);", block)
+            time.sleep(0.1)  # Allow image to load
+
+            try:
+                title_el = block.find_element(By.CSS_SELECTOR, ".product-name a span")
+            except:
+                title_el = block.find_element(By.CLASS_NAME, "product-name")
             title = title_el.text.strip()
 
             url_el = block.find_element(By.CSS_SELECTOR, "a.product-image-link")
             full_url = url_el.get_attribute("href")
 
-            image_el = block.find_element(By.CSS_SELECTOR, "img.product-image")
+            try:
+                image_el = block.find_element(By.CSS_SELECTOR, "img.product-image")
+            except:
+                image_el = block.find_element(By.CSS_SELECTOR, "img[data-test-id='alt-image']")
             image_url = image_el.get_attribute("src")
 
             price_block = block.find_element(By.CLASS_NAME, "product-pricing")
@@ -90,8 +100,17 @@ def scrape_products(driver):
                 "Store": "West Elm"
             })
         except Exception as e:
-            logging.warning(f"Skipping product due to error: {e}")
-    return data
+            logging.warning(f"[Block {i}] Skipping product due to error: {e}")
+            try:
+                skipped.append({
+                    "index": i,
+                    "error": str(e),
+                    "html": block.get_attribute("outerHTML")
+                })
+            except:
+                pass
+
+    return data, skipped
 
 def main():
     options = Options()
@@ -103,11 +122,15 @@ def main():
 
     dismiss_modals(driver)
     scroll_page(driver)
-    products = scrape_products(driver)
+    products, skipped = scrape_products(driver)
 
     with open("west_elm_open_box.json", "w") as f:
         json.dump(products, f, indent=2)
     logging.info(f"Saved {len(products)} items to west_elm_open_box.json")
+
+    with open("west_elm_skipped_blocks.json", "w") as f:
+        json.dump(skipped, f, indent=2)
+    logging.info(f"Saved {len(skipped)} skipped blocks to west_elm_skipped_blocks.json")
 
     driver.quit()
 
