@@ -1,130 +1,127 @@
+
 import json
-import logging
-import random
 import time
+import random
+import logging
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.INFO)
 
 URL = "https://www.williams-sonoma.com/shop/sale-special-offer/open-box-deals/"
 
-options = uc.ChromeOptions()
-options.add_argument("--no-sandbox")
-options.add_argument("--disable-blink-features=AutomationControlled")
-options.add_argument("--window-size=1920,1080")
-options.add_argument("user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36")
+def scroll_page(driver):
+    logging.info("Beginning incremental scroll...")
+    last_count = 0
+    attempts = 0
 
-driver = uc.Chrome(options=options)
-wait = WebDriverWait(driver, 20)
-
-def slow_human_scroll(max_scrolls=40):
-    logging.info("Starting human-like scrolling...")
-    time.sleep(5)  # initial wait for page JS to settle
-
-    for scroll_num in range(max_scrolls):
-        driver.execute_script("window.scrollBy(0, window.innerHeight * 0.8);")
-        logging.info(f"Scroll {scroll_num + 1}/{max_scrolls}")
-        time.sleep(random.uniform(1, 2))
+    while True:
+        products = driver.find_elements(By.CLASS_NAME, "grid-item")
+        current_count = len(products)
+        logging.info(f"Scrolled to {current_count} products")
 
         try:
-            show_more = driver.find_element(By.XPATH, "//div[contains(@class, 'buttons') and contains(@class, 'show-me-more')]/button")
+            show_more = driver.find_element(By.XPATH, "//div[contains(@class, 'show-me-more')]/button")
             if show_more.is_displayed():
                 logging.info("Clicking 'Show Me More' button")
                 driver.execute_script("arguments[0].click();", show_more)
-                time.sleep(random.uniform(2.5, 3.5))
-        except:
-            continue  # No button visible, continue scrolling
+                time.sleep(random.uniform(2.0, 3.0))
+        except Exception as e:
+            logging.debug("No 'Show Me More' button found: %s", e)
 
-def extract_product_info(product):
-    try:
-        title_elem = product.find_element(By.CLASS_NAME, "product-name")
-        title = title_elem.text.strip()
+        if current_count > last_count:
+            last_count = current_count
+            attempts = 0
+        else:
+            attempts += 1
 
-        link = product.find_element(By.CSS_SELECTOR, "a.product-image-link").get_attribute("href")
-        full_url = f"https://www.williams-sonoma.com{link}" if link.startswith("/") else link
+        if attempts > 6:
+            logging.info("No new items loaded after multiple scrolls. Stopping.")
+            break
 
+        ActionChains(driver).scroll_by_amount(0, 1000).perform()
+        time.sleep(random.uniform(1.2, 1.8))
+
+def scrape_products(driver):
+    data = []
+    skipped = []
+    blocks = driver.find_elements(By.CLASS_NAME, "grid-item")
+    logging.info(f"Extracting {len(blocks)} products...")
+
+    for i, block in enumerate(blocks):
         try:
-            orig_price = product.find_element(By.CLASS_NAME, "suggested-price").text.strip()
-        except:
-            orig_price = None
+            driver.execute_script("arguments[0].scrollIntoView(true);", block)
+            time.sleep(0.1)
 
-        try:
-            sale_price = product.find_element(By.CLASS_NAME, "sale-price").text.strip()
-        except:
-            sale_price = None
-
-        # Scroll into view to help load image
-        try:
-            ActionChains(driver).move_to_element(product).perform()
-            time.sleep(1.5)
-        except:
-            pass
-
-        image_url = None
-        try:
-            image_elem = product.find_element(By.CSS_SELECTOR, "img.product-image")
-        except:
             try:
-                image_elem = product.find_element(By.CSS_SELECTOR, "img.alt-image")
+                title_el = block.find_element(By.CSS_SELECTOR, ".product-name a span")
             except:
-                logging.warning("No image found for product.")
-                image_elem = None
+                title_el = block.find_element(By.CLASS_NAME, "product-name")
+            title = title_el.text.strip()
 
-        if image_elem:
-            image_url = image_elem.get_attribute("src") or image_elem.get_attribute("data-src")
-            if image_url:
-                image_url = image_url.replace("-t.jpg", "-c.jpg").replace("-j.jpg", "-c.jpg")
+            url_el = block.find_element(By.CSS_SELECTOR, "a.product-image-link")
+            full_url = url_el.get_attribute("href")
 
-        return {
-            "Product Name": title,
-            "Original Price": orig_price,
-            "Sale Price": sale_price,
-            "Image URL": image_url,
-            "Product Display Page URL": full_url,
-            "Store": "Williams Sonoma"
-        }
+            try:
+                image_el = block.find_element(By.CSS_SELECTOR, "img.product-image")
+            except:
+                image_el = block.find_element(By.CSS_SELECTOR, "img[data-test-id='alt-image']")
+            image_url = image_el.get_attribute("src")
 
-    except Exception as e:
-        logging.warning(f"Failed to parse product: {e}")
-        return None
+            price_block = block.find_element(By.CLASS_NAME, "product-pricing")
+            amounts = price_block.find_elements(By.CSS_SELECTOR, "span.amount")
+
+            sale_price = f"${amounts[0].text.strip()}" if len(amounts) > 0 else None
+            orig_price = f"${amounts[-1].text.strip()}" if len(amounts) > 1 else None
+
+            data.append({
+                "Product Name": title,
+                "Original Price": orig_price,
+                "Sale Price": sale_price,
+                "Image URL": image_url,
+                "Product Display Page URL": full_url,
+                "Store": "Williams Sonoma"
+            })
+        except Exception as e:
+            logging.warning(f"[Block {i}] Skipping product due to error: {e}")
+            try:
+                skipped.append({
+                    "index": i,
+                    "error": str(e),
+                    "html": block.get_attribute("outerHTML")
+                })
+            except:
+                pass
+
+    return data, skipped
 
 def main():
-    try:
-        logging.info(f"Opening {URL}")
-        driver.get(URL)
-        wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+    options = uc.ChromeOptions()
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36")
 
-        slow_human_scroll()
+    driver = uc.Chrome(options=options)
+    driver.get(URL)
 
-        with open("page_debug_dump.html", "w") as f:
-            f.write(driver.page_source)
-        logging.info("Saved page HTML to page_debug_dump.html")
+    WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
 
-        products = driver.find_elements(By.CLASS_NAME, "grid-item")
-        logging.info(f"Found {len(products)} product elements")
+    scroll_page(driver)
+    products, skipped = scrape_products(driver)
 
-        results = []
-        for product in products:
-            info = extract_product_info(product)
-            if info:
-                results.append(info)
+    with open("williams_sonoma_open_box.json", "w") as f:
+        json.dump(products, f, indent=2)
+    logging.info(f"Saved {len(products)} items to williams_sonoma_open_box.json")
 
-        with open("williams_sonoma_open_box.json", "w") as f:
-            json.dump(results, f, indent=2)
-        logging.info(f"Saved {len(results)} products to JSON")
+    with open("williams_sonoma_skipped_blocks.json", "w") as f:
+        json.dump(skipped, f, indent=2)
+    logging.info(f"Saved {len(skipped)} skipped blocks to williams_sonoma_skipped_blocks.json")
 
-    except Exception as e:
-        logging.error(f"Unhandled scraping error: {e}")
-        with open("failed_dump.html", "w") as f:
-            f.write(driver.page_source)
-        logging.info("Saved HTML dump to failed_dump.html")
-
-    finally:
-        driver.quit()
+    driver.quit()
 
 if __name__ == "__main__":
     main()

@@ -1,3 +1,4 @@
+
 import json
 import time
 import random
@@ -5,6 +6,7 @@ import logging
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -17,10 +19,7 @@ def dismiss_modals(driver):
         WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.CLASS_NAME, "modal_component"))
         )
-
-        # Try known button classes across Pottery Barn / West Elm
         close_selectors = [".btnClose", ".stickyOverlayMinimizeButton"]
-
         for selector in close_selectors:
             buttons = driver.find_elements(By.CSS_SELECTOR, selector)
             for button in buttons:
@@ -31,87 +30,112 @@ def dismiss_modals(driver):
     except Exception as e:
         logging.info("No modal appeared or error during dismissal: %s", e)
 
-def scroll_and_click(driver):
-    last_height = driver.execute_script("return document.body.scrollHeight")
-    retries = 0
+def scroll_page(driver):
+    logging.info("Beginning incremental scroll...")
+    last_count = 0
+    attempts = 0
 
     while True:
-        driver.execute_script("window.scrollBy(0, 1000);")
-        time.sleep(random.uniform(1.2, 1.6))
+        products = driver.find_elements(By.CLASS_NAME, "grid-item")
+        current_count = len(products)
+        logging.info(f"Scrolled to {current_count} products")
 
         try:
-            dismiss_modals(driver)
-        except:
-            pass
-
-        try:
-            show_more = driver.find_element(By.XPATH, "//div[contains(@class, 'buttons') and contains(@class, 'show-me-more')]/button")
+            show_more = driver.find_element(By.XPATH, "//div[contains(@class, 'show-me-more')]/button")
             if show_more.is_displayed():
                 logging.info("Clicking 'Show Me More' button")
                 driver.execute_script("arguments[0].click();", show_more)
-                time.sleep(random.uniform(2.5, 3.5))
-        except:
-            pass
+                time.sleep(random.uniform(2.0, 3.0))
+        except Exception as e:
+            logging.debug("No 'Show Me More' button found: %s", e)
 
-        new_height = driver.execute_script("return document.body.scrollHeight")
-        if new_height == last_height:
-            retries += 1
-            if retries > 3:
-                break
+        if current_count > last_count:
+            last_count = current_count
+            attempts = 0
         else:
-            last_height = new_height
-            retries = 0
+            attempts += 1
 
-def extract_data(driver):
-    products = []
-    elements = driver.find_elements(By.CSS_SELECTOR, "div.grid-item")
+        if attempts > 6:
+            logging.info("No new items loaded after multiple scrolls. Stopping.")
+            break
 
-    for el in elements:
+        ActionChains(driver).scroll_by_amount(0, 1000).perform()
+        time.sleep(random.uniform(1.2, 1.8))
+
+def scrape_products(driver):
+    data = []
+    skipped = []
+    blocks = driver.find_elements(By.CLASS_NAME, "grid-item")
+    logging.info(f"Extracting {len(blocks)} products...")
+
+    for i, block in enumerate(blocks):
         try:
-            title = el.find_element(By.CSS_SELECTOR, ".product-name a span").text.strip()
-            product_url = el.find_element(By.CSS_SELECTOR, ".product-name a").get_attribute("href")
-            image_url = el.find_element(By.CSS_SELECTOR, "img.product-image").get_attribute("src")
+            driver.execute_script("arguments[0].scrollIntoView(true);", block)
+            time.sleep(0.1)
 
-            price_section = el.find_element(By.CSS_SELECTOR, "[data-test-id='product-pricing']")
-            prices = price_section.find_elements(By.CSS_SELECTOR, ".amount")
+            try:
+                title_el = block.find_element(By.CSS_SELECTOR, ".product-name a span")
+            except:
+                title_el = block.find_element(By.CLASS_NAME, "product-name")
+            title = title_el.text.strip()
 
-            sale_price = prices[0].text.strip() if len(prices) > 0 else None
-            orig_price = prices[1].text.strip() if len(prices) > 1 else None
+            url_el = block.find_element(By.CSS_SELECTOR, "a.product-image-link")
+            full_url = url_el.get_attribute("href")
 
-            products.append({
+            try:
+                image_el = block.find_element(By.CSS_SELECTOR, "img.product-image")
+            except:
+                image_el = block.find_element(By.CSS_SELECTOR, "img[data-test-id='alt-image']")
+            image_url = image_el.get_attribute("src")
+
+            price_block = block.find_element(By.CLASS_NAME, "product-pricing")
+            amounts = price_block.find_elements(By.CSS_SELECTOR, "span.amount")
+
+            sale_price = f"${amounts[0].text.strip()}" if len(amounts) > 0 else None
+            orig_price = f"${amounts[-1].text.strip()}" if len(amounts) > 1 else None
+
+            data.append({
                 "Product Name": title,
-                "Original Price": f"${orig_price}" if orig_price else None,
-                "Sale Price": f"${sale_price}" if sale_price else None,
+                "Original Price": orig_price,
+                "Sale Price": sale_price,
                 "Image URL": image_url,
-                "Product Display Page URL": product_url,
+                "Product Display Page URL": full_url,
                 "Store": "Pottery Barn"
             })
         except Exception as e:
-            logging.warning(f"Skipping product due to error: {e}")
-            continue
+            logging.warning(f"[Block {i}] Skipping product due to error: {e}")
+            try:
+                skipped.append({
+                    "index": i,
+                    "error": str(e),
+                    "html": block.get_attribute("outerHTML")
+                })
+            except:
+                pass
 
-    return products
+    return data, skipped
 
 def main():
     options = Options()
+    options.add_experimental_option("detach", True)
     options.add_argument("--start-maximized")
+
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    driver.get("https://www.potterybarn.com/shop/sale/open-box-deals/")
 
-    try:
-        url = "https://www.potterybarn.com/shop/sale/open-box-deals/"
-        driver.get(url)
-        time.sleep(5)
+    dismiss_modals(driver)
+    scroll_page(driver)
+    products, skipped = scrape_products(driver)
 
-        dismiss_modals(driver)
-        scroll_and_click(driver)
-        data = extract_data(driver)
+    with open("pottery_barn_open_box.json", "w") as f:
+        json.dump(products, f, indent=2)
+    logging.info(f"Saved {len(products)} items to pottery_barn_open_box.json")
 
-        with open("pottery_barn_open_box.json", "w") as f:
-            json.dump(data, f, indent=2)
+    with open("pottery_barn_skipped_blocks.json", "w") as f:
+        json.dump(skipped, f, indent=2)
+    logging.info(f"Saved {len(skipped)} skipped blocks to pottery_barn_skipped_blocks.json")
 
-        logging.info(f"Scraped {len(data)} products.")
-    finally:
-        driver.quit()
+    driver.quit()
 
 if __name__ == "__main__":
     main()
